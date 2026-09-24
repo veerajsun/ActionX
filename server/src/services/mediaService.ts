@@ -19,7 +19,7 @@ function spawnSafe(
   options: { onStdoutLine?: (line: string) => void; timeoutMs?: number } = {},
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { windowsHide: true });
+    const child = spawn(binary, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let stdoutBuffer = "";
@@ -31,7 +31,14 @@ function spawnSafe(
         }, options.timeoutMs)
       : undefined;
 
-    child.stdout.on("data", (chunk: Buffer) => {
+    if (!child.stdout || !child.stderr) {
+      reject(new Error(`Failed to open stdio pipes for ${binary}.`));
+      return;
+    }
+    const stdoutStream = child.stdout;
+    const stderrStream = child.stderr;
+
+    stdoutStream.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
       if (options.onStdoutLine) {
@@ -41,7 +48,7 @@ function spawnSafe(
         for (const line of lines) options.onStdoutLine(line);
       }
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    stderrStream.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
 
