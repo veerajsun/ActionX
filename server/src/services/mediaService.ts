@@ -23,11 +23,15 @@ function spawnSafe(
     let stdout = "";
     let stderr = "";
     let stdoutBuffer = "";
+    let settled = false;
 
     const timeout = options.timeoutMs
       ? setTimeout(() => {
           child.kill("SIGKILL");
-          reject(new Error(`${binary} timed out after ${options.timeoutMs}ms`));
+          if (!settled) {
+            settled = true;
+            reject(new Error(`${binary} timed out after ${options.timeoutMs}ms`));
+          }
         }, options.timeoutMs)
       : undefined;
 
@@ -35,31 +39,48 @@ function spawnSafe(
       reject(new Error(`Failed to open stdio pipes for ${binary}.`));
       return;
     }
-    const stdoutStream = child.stdout;
-    const stderrStream = child.stderr;
 
-    stdoutStream.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stdout += text;
-      if (options.onStdoutLine) {
-        stdoutBuffer += text;
-        const lines = stdoutBuffer.split(/\r?\n/);
-        stdoutBuffer = lines.pop() ?? "";
-        for (const line of lines) options.onStdoutLine(line);
+    // Read via async iteration instead of `.on("data", ...)` — some
+    // TypeScript/@types/node combinations mis-resolve the "data" event
+    // overload on Readable streams, and this sidesteps that entirely while
+    // being an equally standard, well-supported Node.js pattern.
+    async function consumeStdout(stream: NodeJS.ReadableStream): Promise<void> {
+      for await (const chunk of stream) {
+        const text: string = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+        stdout += text;
+        if (options.onStdoutLine) {
+          stdoutBuffer += text;
+          const lines = stdoutBuffer.split(/\r?\n/);
+          stdoutBuffer = lines.pop() ?? "";
+          for (const line of lines) options.onStdoutLine(line);
+        }
       }
-    });
-    stderrStream.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+    }
+
+    async function consumeStderr(stream: NodeJS.ReadableStream): Promise<void> {
+      for await (const chunk of stream) {
+        stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      }
+    }
+
+    void Promise.all([consumeStdout(child.stdout), consumeStderr(child.stderr)]).catch(() => {
+      // Stream read failures surface via the process "error"/"close" handlers below.
     });
 
     child.on("error", (err) => {
       if (timeout) clearTimeout(timeout);
-      reject(err);
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
     });
 
     child.on("close", (code) => {
       if (timeout) clearTimeout(timeout);
-      resolve({ code, stdout, stderr });
+      if (!settled) {
+        settled = true;
+        resolve({ code, stdout, stderr });
+      }
     });
   });
 }
